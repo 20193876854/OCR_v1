@@ -9,6 +9,7 @@ from django.conf import settings
 from pathlib import Path
 import logging
 from pdf2image import convert_from_path
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -16,6 +17,12 @@ DATA_ROOT = settings.DATA_ROOT_PATH
 BASE_OUTPUT_DIR = DATA_ROOT / 'data' / 'mineru_output'
 POPPLER_PATH = os.getenv('POPPLER_PATH', None)
 MINERU_COMMAND = 'mineru'
+
+# Label Studio 配置
+LABEL_STUDIO_URL = os.getenv('LABEL_STUDIO_URL', 'http://label-studio:8081')
+LABEL_STUDIO_API_TOKEN = os.getenv('LABEL_STUDIO_API_TOKEN', '')
+LABEL_STUDIO_PROJECT_ID = os.getenv('LABEL_STUDIO_PROJECT_ID', '')
+AUTO_IMPORT_TO_LABEL_STUDIO = os.getenv('AUTO_IMPORT_TO_LABEL_STUDIO', 'true').lower() == 'true'
 
 # GPU检测和配置
 def check_gpu_available():
@@ -33,6 +40,155 @@ def check_gpu_available():
             return False
     except Exception as e:
         logger.warning(f"GPU检测失败: {e}，将使用CPU模式")
+        return False
+
+def _create_ls_region(bbox, page_dims, label, text_content=None):
+    """创建Label Studio的区域标注"""
+    page_width, page_height = page_dims
+    x1, y1, x2, y2 = bbox
+    if page_width == 0 or page_height == 0:
+        return []
+    
+    x = (x1 / page_width) * 100
+    y = (y1 / page_height) * 100
+    width = ((x2 - x1) / page_width) * 100
+    height = ((y2 - y1) / page_height) * 100
+    
+    region_id = f"ls_{uuid.uuid4().hex[:10]}"
+    
+    results = [{
+        "id": region_id,
+        "from_name": "bbox",
+        "to_name": "image",
+        "type": "rectanglelabels",
+        "value": {
+            "x": x,
+            "y": y,
+            "width": width,
+            "height": height,
+            "rotation": 0,
+            "rectanglelabels": [label]
+        }
+    }]
+    
+    if text_content and text_content.strip():
+        results.append({
+            "id": region_id,
+            "from_name": "transcription",
+            "to_name": "image",
+            "type": "textarea",
+            "value": {
+                "text": [text_content.strip()]
+            }
+        })
+    
+    return results
+
+def _generate_ls_tasks(mineru_data, doc, unique_folder_name):
+    """从MinerU数据生成Label Studio任务"""
+    ls_tasks = []
+    task_output_dir = BASE_OUTPUT_DIR / unique_folder_name
+    
+    pdf_info = mineru_data.get('pdf_info', [])
+    if not pdf_info:
+        raise ValueError("Invalid MinerU JSON format: 'pdf_info' key missing.")
+    
+    type_mapping = {
+        'text': 'Text',
+        'title': 'Title',
+        'list': 'List',
+        'figure': 'Figure',
+        'foot': 'Footer',
+        'head': 'Header',
+        'equation': 'Equation',
+        'table': 'Table'
+    }
+    
+    for page_data in pdf_info:
+        page_index = page_data.get('page_idx', 0)
+        page_size = page_data.get('page_size')
+        
+        if not page_size or len(page_size) != 2 or page_size[0] == 0 or page_size[1] == 0:
+            logger.warning(f"Page size missing or invalid for page {page_index}. Skipping.")
+            continue
+        
+        page_dims = (page_size[0], page_size[1])
+        page_filename = f"page-{str(page_index + 1).zfill(4)}.jpg"
+        image_path = task_output_dir / "pages" / page_filename
+        
+        if not image_path.exists():
+            logger.warning(f"Could not find image for page {page_index + 1} at expected path: {image_path}")
+            continue
+        
+        relative_image_path = Path('data') / 'mineru_output' / unique_folder_name / 'pages' / page_filename
+        image_url = f"/data/local-files/?d={relative_image_path.as_posix()}"
+        
+        task = {
+            "data": {"image": image_url},
+            "predictions": [{"result": []}]
+        }
+        
+        all_blocks = page_data.get('para_blocks', []) + page_data.get('preproc_blocks', [])
+        
+        for block in all_blocks:
+            block_type = block.get('type')
+            label = type_mapping.get(block_type, 'Unknown')
+            
+            if block_type == 'figure':
+                if 'bbox' in block:
+                    task["predictions"][0]["result"].extend(
+                        _create_ls_region(block['bbox'], page_dims, 'Figure')
+                    )
+                for line in block.get('lines', []):
+                    if 'bbox' in line:
+                        text = ''.join(s.get('content', '') for s in line.get('spans', []))
+                        task["predictions"][0]["result"].extend(
+                            _create_ls_region(line['bbox'], page_dims, 'Text', text)
+                        )
+            elif block_type in ['text', 'title', 'list', 'foot', 'head']:
+                for line in block.get('lines', []):
+                    if 'bbox' in line:
+                        text = ''.join(s.get('content', '') for s in line.get('spans', []))
+                        task["predictions"][0]["result"].extend(
+                            _create_ls_region(line['bbox'], page_dims, label, text)
+                        )
+            elif 'bbox' in block:
+                task["predictions"][0]["result"].extend(
+                    _create_ls_region(block['bbox'], page_dims, label)
+                )
+        
+        if task["predictions"][0]["result"]:
+            ls_tasks.append(task)
+    
+    return ls_tasks
+
+def auto_import_to_label_studio(doc_id, ls_tasks):
+    """自动将OCR结果导入Label Studio"""
+    if not AUTO_IMPORT_TO_LABEL_STUDIO:
+        logger.info(f"自动导入功能已禁用，跳过文档 {doc_id}")
+        return False
+    
+    if not LABEL_STUDIO_API_TOKEN or not LABEL_STUDIO_PROJECT_ID:
+        logger.warning(f"Label Studio配置不完整，跳过自动导入文档 {doc_id}")
+        return False
+    
+    try:
+        import_url = f"{LABEL_STUDIO_URL}/api/projects/{LABEL_STUDIO_PROJECT_ID}/import"
+        headers = {
+            "Authorization": f"Token {LABEL_STUDIO_API_TOKEN}",
+            "Content-Type": "application/json"
+        }
+        
+        response = requests.post(import_url, json=ls_tasks, headers=headers, timeout=30)
+        
+        if response.status_code in [200, 201]:
+            logger.info(f"✓ 成功自动导入 {len(ls_tasks)} 个任务到Label Studio (文档 {doc_id})")
+            return True
+        else:
+            logger.error(f"Label Studio API返回错误 (文档 {doc_id}): {response.status_code} - {response.text}")
+            return False
+    except Exception as e:
+        logger.error(f"自动导入到Label Studio失败 (文档 {doc_id}): {e}", exc_info=True)
         return False
 
 @shared_task
@@ -109,6 +265,29 @@ def process_pdf_with_mineru(doc_id):
         doc.save(update_fields=['mineru_json_path', 'status'])
         
         logger.info(f"Celery Task fully succeeded for Doc ID {doc_id}.")
+        
+        # ============ 新增：自动导入Label Studio ============
+        if AUTO_IMPORT_TO_LABEL_STUDIO:
+            try:
+                logger.info(f"开始自动导入文档 {doc_id} 到Label Studio...")
+                
+                # 生成Label Studio任务
+                mineru_json_path = Path(doc.mineru_json_path)
+                unique_folder_name = mineru_json_path.parents[1].name
+                ls_tasks = _generate_ls_tasks(ocr_data, doc, unique_folder_name)
+                
+                # 自动导入
+                if auto_import_to_label_studio(doc_id, ls_tasks):
+                    doc.label_studio_project_id = LABEL_STUDIO_PROJECT_ID
+                    doc.save(update_fields=['label_studio_project_id'])
+                    logger.info(f"✓ 文档 {doc_id} 已自动导入到Label Studio项目 {LABEL_STUDIO_PROJECT_ID}")
+                else:
+                    logger.warning(f"⚠ 文档 {doc_id} 自动导入Label Studio失败，但OCR处理已完成")
+            except Exception as e:
+                logger.error(f"自动导入Label Studio时出错 (文档 {doc_id}): {e}", exc_info=True)
+                # 不抛出异常，因为OCR处理已完成
+        # ==================================================
+        
         return f"Success: {str(json_path)}"
 
     except Exception as e:
