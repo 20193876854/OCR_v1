@@ -122,6 +122,10 @@ services:
     environment:
       - LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED=true
       - LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT=/data
+      # 配置子路径支持（通过 Nginx 访问时）
+      - LABEL_STUDIO_BASE_URL=/label-studio
+      - LABEL_STUDIO_HOST=
+      - LABEL_STUDIO_PROTOCOL=http
     restart: unless-stopped
 
   # Nginx 反向代理服务 - 统一入口

@@ -49,6 +49,7 @@ def _generate_ls_tasks(mineru_data, doc: OcrDocument, unique_folder_name: str):
     pdf_info = mineru_data.get('pdf_info', [])
     if not pdf_info: raise ValueError("Invalid MinerU JSON format: 'pdf_info' key missing.")
     type_mapping = {'text': 'Text', 'title': 'Title', 'list': 'List', 'figure': 'Figure', 'foot': 'Footer', 'head': 'Header', 'equation': 'Equation', 'table': 'Table'}
+    
     for page_data in pdf_info:
         page_index = page_data.get('page_idx', 0)
         page_size = page_data.get('page_size')
@@ -59,8 +60,14 @@ def _generate_ls_tasks(mineru_data, doc: OcrDocument, unique_folder_name: str):
         image_path = task_output_dir / "pages" / page_filename
         if not image_path.exists():
             logger.warning(f"Could not find image for page {page_index + 1} at expected path: {image_path}"); continue
-        relative_image_path = Path('data') / 'mineru_output' / unique_folder_name / 'pages' / page_filename
-        image_url = f"/data/local-files/?d={relative_image_path.as_posix()}"
+        
+        # Label Studio local-files 路径格式: /data/local-files/?d=相对路径
+        # 在容器中，./data 映射到 /data，所以相对路径从 mineru_output 开始
+        relative_image_path = f"mineru_output/{unique_folder_name}/pages/{page_filename}"
+        image_url = f"/data/local-files/?d={relative_image_path}"
+        
+        logger.debug(f"Generated image URL for page {page_index + 1}: {image_url}")
+        
         task = {"data": {"image": image_url}, "predictions": [{"result": []}]}
         all_blocks = page_data.get('para_blocks', []) + page_data.get('preproc_blocks', [])
         for block in all_blocks:
