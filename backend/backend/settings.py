@@ -103,3 +103,8 @@ CELERY_TASK_SERIALIZER = 'json'
 DATA_ROOT_PATH = Path(os.getenv('LOCAL_DATA_PATH')) if os.getenv('LOCAL_DATA_PATH') else BASE_DIR.parent
 DATA_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
 
+# Label Studio 配置
+LABEL_STUDIO_URL = os.getenv('LABEL_STUDIO_URL', 'http://label-studio:8081')
+LABEL_STUDIO_API_KEY = os.getenv('LABEL_STUDIO_API_KEY', '')  # 可选：如果需要认证
+LABEL_STUDIO_PROJECT_ID = os.getenv('LABEL_STUDIO_PROJECT_ID', '')  # 项目ID
+

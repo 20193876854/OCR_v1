@@ -16,10 +16,19 @@
         .status-processed { background-color: #10b981; }
         .status-failed { background-color: #ef4444; }
         .status-corrected { background-color: #14b8a6; }
-        /* 新增 'ingested' 状态样式 */
-        .status-ingested { background-color: #8b5cf6; } /* 紫色 */
+        .status-ingested { background-color: #8b5cf6; }
 
-        .btn { padding: 8px 16px; border-radius: 6px; color: white; font-weight: 500; transition: background-color 0.2s; cursor: pointer; border: none; }
+        .btn { 
+            padding: 8px 16px; 
+            border-radius: 6px; 
+            color: white; 
+            font-weight: 500; 
+            transition: all 0.2s; 
+            cursor: pointer; 
+            border: none;
+            font-size: 0.875rem;
+            white-space: nowrap;
+        }
         .btn-primary { background-color: #3b82f6; }
         .btn-primary:hover { background-color: #2563eb; }
         .btn-secondary { background-color: #6b7280; }
@@ -30,7 +39,35 @@
         .btn-success:hover { background-color: #16a34a; }
         .btn-info { background-color: #0ea5e9; }
         .btn-info:hover { background-color: #0284c7; }
+        .btn-warning { background-color: #f59e0b; }
+        .btn-warning:hover { background-color: #d97706; }
+        
+        /* 响应式按钮 */
+        @media (max-width: 640px) {
+            .btn { 
+                padding: 6px 12px; 
+                font-size: 0.75rem;
+            }
+        }
+        
         [v-cloak] { display: none; }
+        
+        /* 加载动画 */
+        .spinner {
+            border: 2px solid #f3f3f3;
+            border-top: 2px solid #3b82f6;
+            border-radius: 50%;
+            width: 16px;
+            height: 16px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            margin-left: 8px;
+        }
+        
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
     </style>
 </head>
 <body class="bg-gray-100 text-gray-800">
@@ -71,42 +108,80 @@
             <p>加载文档列表中...</p>
         </div>
         <ul v-else class="space-y-4">
-            <li v-for="doc in documents" :key="doc.id" class="p-4 border border-gray-200 rounded-lg flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
-                <div class="flex-grow">
-                    <div class="flex items-center gap-3 flex-wrap">
-                        <span class="status-dot" :class="`status-${doc.status}`" :title="doc.status"></span>
-                        <p class="font-mono text-sm text-gray-700 break-all">{{ getFileName(doc.original_pdf_path) }}</p>
-                        
-                        <span v-if="doc.raw_ocr_json" class="text-xs font-semibold text-sky-600 bg-sky-100 px-2 py-1 rounded-full">
-                            OCR完成
-                        </span>
-                        
-                        <span v-if="doc.corrected_label_studio_json" class="text-xs font-semibold text-teal-600 bg-teal-100 px-2 py-1 rounded-full">
-                            校对已保存
-                        </span>
-                         <!-- 新增状态标签 -->
-                        <span v-if="doc.status === 'ingested'" class="text-xs font-semibold text-violet-600 bg-violet-100 px-2 py-1 rounded-full">
-                            RAGFlow文件已生成
-                        </span>
+            <li v-for="doc in documents" :key="doc.id" class="p-4 border border-gray-200 rounded-lg">
+                <!-- 文档信息区域 -->
+                <div class="flex flex-col lg:flex-row items-start lg:items-center justify-between gap-4">
+                    <div class="flex-grow min-w-0">
+                        <div class="flex items-center gap-3 flex-wrap">
+                            <span class="status-dot" :class="`status-${doc.status}`" :title="doc.status"></span>
+                            <p class="font-mono text-sm text-gray-700 break-all">{{ getFileName(doc.original_pdf_path) }}</p>
+                            
+                            <span v-if="doc.raw_ocr_json" class="text-xs font-semibold text-sky-600 bg-sky-100 px-2 py-1 rounded-full">
+                                OCR完成
+                            </span>
+                            
+                            <span v-if="doc.corrected_label_studio_json" class="text-xs font-semibold text-teal-600 bg-teal-100 px-2 py-1 rounded-full">
+                                校对已保存
+                            </span>
+                            
+                            <span v-if="doc.status === 'ingested'" class="text-xs font-semibold text-violet-600 bg-violet-100 px-2 py-1 rounded-full">
+                                RAGFlow文件已生成
+                            </span>
+                        </div>
+                        <p class="text-xs text-gray-500 mt-1">上传于: {{ new Date(doc.created_at).toLocaleString() }}</p>
                     </div>
-                    <p class="text-xs text-gray-500 mt-1">上传于: {{ new Date(doc.created_at).toLocaleString() }}</p>
-                </div>
-                <div class="flex items-center gap-2 flex-wrap">
-                    <!-- 新增按钮 -->
-                    <button @click="downloadRAGFlowPayload(doc.id)" :disabled="doc.status !== 'corrected' && doc.status !== 'ingested'" class="btn btn-success text-sm" :class="{'opacity-50 cursor-not-allowed': doc.status !== 'corrected' && doc.status !== 'ingested'}">
-                        生成RAGFlow文件
-                    </button>
-
-                    <input type="file" :ref="`correctionFileInput_${doc.id}`" @change="handleCorrectionFileUpload($event, doc.id)" class="hidden" accept=".json">
-                    <button @click="triggerCorrectionFileUpload(doc.id)" class="btn btn-info text-sm">
-                        上传校对JSON
-                    </button>
                     
-                    <button @click="downloadRawOcrJson(doc.id)" :disabled="!isReadyForDownload(doc.status)" class="btn btn-secondary text-sm" :class="{'opacity-50 cursor-not-allowed': !isReadyForDownload(doc.status)}">
-                        下载原始OCR JSON
-                    </button>
+                    <!-- 操作按钮区域 - 响应式布局 -->
+                    <div class="flex flex-wrap items-center gap-2 w-full lg:w-auto">
+                        <!-- 自动上传到Label Studio按钮 -->
+                        <button 
+                            @click="uploadToLabelStudio(doc.id)" 
+                            :disabled="!isReadyForDownload(doc.status) || uploadingToLS[doc.id]" 
+                            class="btn btn-warning text-sm flex-1 sm:flex-none"
+                            :class="{'opacity-50 cursor-not-allowed': !isReadyForDownload(doc.status) || uploadingToLS[doc.id]}"
+                        >
+                            <span v-if="uploadingToLS[doc.id]">上传中<span class="spinner"></span></span>
+                            <span v-else>📤 自动上传LS</span>
+                        </button>
+                        
+                        <!-- 手动下载原始OCR JSON按钮 -->
+                        <button 
+                            @click="downloadRawOcrJson(doc.id)" 
+                            :disabled="!isReadyForDownload(doc.status)" 
+                            class="btn btn-secondary text-sm flex-1 sm:flex-none" 
+                            :class="{'opacity-50 cursor-not-allowed': !isReadyForDownload(doc.status)}"
+                            title="下载原始OCR JSON进行手动处理"
+                        >
+                            📥 下载OCR JSON
+                        </button>
 
-                    <button @click="deleteDocument(doc.id)" class="btn btn-danger text-sm">删除</button>
+                        <!-- 上传校对JSON按钮 -->
+                        <input type="file" :ref="`correctionFileInput_${doc.id}`" @change="handleCorrectionFileUpload($event, doc.id)" class="hidden" accept=".json">
+                        <button 
+                            @click="triggerCorrectionFileUpload(doc.id)" 
+                            class="btn btn-info text-sm flex-1 sm:flex-none"
+                        >
+                            📤 上传校对JSON
+                        </button>
+                        
+                        <!-- 生成RAGFlow文件按钮 -->
+                        <button 
+                            @click="downloadRAGFlowPayload(doc.id)" 
+                            :disabled="doc.status !== 'corrected' && doc.status !== 'ingested'" 
+                            class="btn btn-success text-sm flex-1 sm:flex-none" 
+                            :class="{'opacity-50 cursor-not-allowed': doc.status !== 'corrected' && doc.status !== 'ingested'}"
+                        >
+                            🚀 生成RAGFlow
+                        </button>
+
+                        <!-- 删除按钮 -->
+                        <button 
+                            @click="deleteDocument(doc.id)" 
+                            class="btn btn-danger text-sm flex-1 sm:flex-none"
+                        >
+                            🗑️ 删除
+                        </button>
+                    </div>
                 </div>
             </li>
         </ul>
@@ -124,11 +199,12 @@
                 isUploading: false,
                 fileToUpload: null,
                 dragover: false,
-                pollInterval: null
+                pollInterval: null,
+                uploadingToLS: {}  // 追踪每个文档的上传状态
             }
         },
         methods: {
-            apiClient() { return axios.create({ baseURL: 'http://10.4.34.108:8010/api' }); },
+            apiClient() { return axios.create({ baseURL: '/api' }); },
             async fetchDocuments() {
                 try {
                     const response = await this.apiClient().get('/documents/');
@@ -158,6 +234,21 @@
                     await this.apiClient().delete(`/documents/${docId}/`);
                     await this.fetchDocuments();
                 } catch (error) { console.error(`删除文档失败:`, error); }
+            },
+            // 新增：自动上传到 Label Studio
+            async uploadToLabelStudio(docId) {
+                this.$set(this.uploadingToLS, docId, true);
+                try {
+                    const response = await this.apiClient().post(`/documents/${docId}/upload-to-label-studio/`);
+                    alert(`成功上传 ${response.data.task_count} 个任务到 Label Studio！\n您可以在 Label Studio 中开始校对了。`);
+                    await this.fetchDocuments();
+                } catch (error) {
+                    console.error('上传到Label Studio失败:', error);
+                    const errorMsg = error.response?.data?.error || '上传失败，请检查 Label Studio 配置。';
+                    alert(`上传到 Label Studio 失败:\n${errorMsg}`);
+                } finally {
+                    this.$set(this.uploadingToLS, docId, false);
+                }
             },
             // 新增 RAGFlow 文件下载方法
             async downloadRAGFlowPayload(docId) {

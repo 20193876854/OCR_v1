@@ -283,3 +283,62 @@ class GenerateRAGFlowPayloadView(APIView):
         except Exception as e:
             logger.error(f"在为文档ID {pk} 生成RAGFlow文件时发生意外错误: {e}", exc_info=True)
             return Response({"error": f"发生意外的服务器错误: {e}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class UploadToLabelStudioView(APIView):
+    """
+    手动触发上传任务到 Label Studio
+    """
+    def post(self, request, pk, *args, **kwargs):
+        logger.info(f"--- [POST] 手动触发上传到 Label Studio，文档ID: {pk} ---")
+        try:
+            doc = OcrDocument.objects.get(pk=pk)
+            
+            if not doc.raw_ocr_json:
+                return Response(
+                    {"error": "未找到原始OCR JSON，无法生成Label Studio任务"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            if not doc.mineru_json_path:
+                return Response(
+                    {"error": "文档处理未完成"},
+                    status=status.HTTP_400_BAD_REQUEST
+                )
+            
+            # 获取 unique_folder_name
+            json_path = Path(doc.mineru_json_path)
+            unique_folder_name = json_path.parents[2].name
+            
+            # 生成 Label Studio 任务
+            ls_tasks = _generate_ls_tasks(doc.raw_ocr_json, doc, unique_folder_name)
+            
+            if not ls_tasks:
+                return Response(
+                    {"error": "无法生成Label Studio任务"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+            
+            # 上传到 Label Studio
+            from .tasks import upload_to_label_studio
+            success = upload_to_label_studio(doc.id, ls_tasks)
+            
+            if success:
+                return Response({
+                    "message": f"成功上传 {len(ls_tasks)} 个任务到 Label Studio",
+                    "task_count": len(ls_tasks)
+                }, status=status.HTTP_200_OK)
+            else:
+                return Response(
+                    {"error": "上传到 Label Studio 失败，请检查配置和日志"},
+                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
+                )
+            
+        except OcrDocument.DoesNotExist:
+            return Response({"error": "文档未找到"}, status=status.HTTP_404_NOT_FOUND)
+        except Exception as e:
+            logger.error(f"手动上传到Label Studio时出错，文档ID {pk}: {e}", exc_info=True)
+            return Response(
+                {"error": f"发生意外错误: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )

@@ -1,33 +1,14 @@
-# 构建阶段
-FROM node:18-alpine as build-stage
+# 使用轻量级 Nginx 直接提供静态文件服务
+FROM nginx:alpine
 
-WORKDIR /app
-
-# 复制package.json和package-lock.json
-COPY package*.json ./
-
-# 安装依赖
-RUN npm install
-
-# 复制项目文件
-COPY . .
-
-# 构建生产版本
-RUN npm run build
-
-# 生产阶段 - 使用轻量级服务器
-FROM node:18-alpine as production-stage
-
-WORKDIR /app
-
-# 全局安装serve
-RUN npm install -g serve
-
-# 从构建阶段复制构建产物
-COPY --from=build-stage /app/dist /app/dist
+# 复制 index.html 到 Nginx 默认目录
+COPY index.html /usr/share/nginx/html/
 
 # 暴露端口
-EXPOSE 8082
+EXPOSE 80
 
-# 启动serve服务
-CMD ["serve", "-s", "dist", "-l", "8082"]
+# 使用自定义 Nginx 配置（如果需要）
+# 如果不需要特殊配置，可以注释掉下面这行
+# COPY nginx.conf /etc/nginx/conf.d/default.conf
+
+# Nginx 会自动启动
