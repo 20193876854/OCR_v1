@@ -126,6 +126,10 @@ services:
       - LABEL_STUDIO_BASE_URL=/label-studio
       - LABEL_STUDIO_HOST=
       - LABEL_STUDIO_PROTOCOL=http
+      # 开发环境：禁用用户认证（生产环境请删除此行）
+      - LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK=false
+      - LABEL_STUDIO_USERNAME=admin@example.com
+      - LABEL_STUDIO_PASSWORD=admin123
     restart: unless-stopped
 
   # Nginx 反向代理服务 - 统一入口
