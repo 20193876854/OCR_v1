@@ -1,19 +1,16 @@
-
-django
+﻿django
 djangorestframework
 django-cors-headers
 gunicorn
 
-
 psycopg2-binary
-
 
 celery
 redis
 
 pdf2image
 unidecode
-mineru 
+mineru
 
 python-dotenv
 Pygments
@@ -26,3 +23,5 @@ ftfy
 shapely
 pyclipper
 omegaconf
+requests
+PyJWT

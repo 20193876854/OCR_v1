@@ -6,11 +6,12 @@ from pathlib import Path
 import requests
 import uuid
 import shutil
+import mimetypes
 
 from django.utils.text import get_valid_filename
 import unidecode
 
-from django.http import JsonResponse, HttpResponse
+from django.http import JsonResponse, HttpResponse, FileResponse, Http404
 from django.core.files.storage import FileSystemStorage
 from rest_framework.views import APIView
 from rest_framework.response import Response
@@ -21,6 +22,7 @@ from pdf2image import convert_from_path
 from .models import OcrDocument
 from .serializers import OcrDocumentSerializer
 from .tasks import process_pdf_with_mineru
+from .label_studio_utils import LabelStudioClient
 
 logger = logging.getLogger(__name__)
 
@@ -48,27 +50,50 @@ def _generate_ls_tasks(mineru_data, doc: OcrDocument, unique_folder_name: str):
     task_output_dir = BASE_OUTPUT_DIR / unique_folder_name
     pdf_info = mineru_data.get('pdf_info', [])
     if not pdf_info: raise ValueError("Invalid MinerU JSON format: 'pdf_info' key missing.")
-    type_mapping = {'text': 'Text', 'title': 'Title', 'list': 'List', 'figure': 'Figure', 'foot': 'Footer', 'head': 'Header', 'equation': 'Equation', 'table': 'Table'}
+    # 映射到 label_studio_config.xml 中定义的标签名称
+    type_mapping = {
+        'text': 'Para',      # 对应 <Label value="Para" />
+        'title': 'Title', 
+        'list': 'List', 
+        'figure': 'Figure', 
+        'foot': 'Footer',    # 对应 <Label value="Footer" />
+        'head': 'Header',    # 对应 <Label value="Header" />
+        'equation': 'Formula',  # 对应 <Label value="Formula" />
+        'table': 'Table'
+    }
+    
+    # 获取 PDF 文件名
+    pdf_path = Path(doc.original_pdf_path)
+    total_pages = len(pdf_info)
     
     for page_data in pdf_info:
         page_index = page_data.get('page_idx', 0)
+        page_num = page_index + 1
         page_size = page_data.get('page_size')
         if not page_size or len(page_size) != 2 or page_size[0] == 0 or page_size[1] == 0:
             logger.warning(f"Page size missing or invalid for page {page_index}. Skipping."); continue
         page_dims = (page_size[0], page_size[1])
-        page_filename = f"page-{str(page_index + 1).zfill(4)}.jpg"
+        page_filename = f"page-{str(page_num).zfill(4)}.jpg"
         image_path = task_output_dir / "pages" / page_filename
         if not image_path.exists():
-            logger.warning(f"Could not find image for page {page_index + 1} at expected path: {image_path}"); continue
+            logger.warning(f"Could not find image for page {page_num} at expected path: {image_path}"); continue
         
-        # Label Studio local-files 路径格式: /data/local-files/?d=相对路径
-        # 在容器中，./data 映射到 /data，所以相对路径从 mineru_output 开始
-        relative_image_path = f"mineru_output/{unique_folder_name}/pages/{page_filename}"
-        image_url = f"/data/local-files/?d={relative_image_path}"
+        # 使用 HTTP URL 格式访问图片
+        backend_url = os.getenv('BACKEND_EXTERNAL_URL', 'http://localhost:8010')
+        image_url = f"{backend_url}/api/images/{unique_folder_name}/{page_filename}"
         
-        logger.debug(f"Generated image URL for page {page_index + 1}: {image_url}")
+        # 添加完整的元数据
+        task = {
+            "data": {
+                "image": image_url,
+                "doc_id": doc.id,
+                "page_num": page_num,
+                "total_pages": total_pages,
+                "filename": pdf_path.name
+            },
+            "predictions": [{"result": []}]
+        }
         
-        task = {"data": {"image": image_url}, "predictions": [{"result": []}]}
         all_blocks = page_data.get('para_blocks', []) + page_data.get('preproc_blocks', [])
         for block in all_blocks:
             block_type = block.get('type')
@@ -292,60 +317,264 @@ class GenerateRAGFlowPayloadView(APIView):
             return Response({"error": f"发生意外的服务器错误: {e}"}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
 
 
-class UploadToLabelStudioView(APIView):
+class IngestToRagflowView(APIView):
     """
-    手动触发上传任务到 Label Studio
+    接收校对后的 Label Studio JSON 数据，保存并转换为 RAGFlow 格式
+    支持两种方式：
+    1. 上传 JSON 文件 (multipart/form-data)
+    2. 直接 POST JSON 数据 (application/json)
     """
     def post(self, request, pk, *args, **kwargs):
-        logger.info(f"--- [POST] 手动触发上传到 Label Studio，文档ID: {pk} ---")
+        logger.info(f"--- [POST] 开始处理文档ID {pk} 的校对数据 ---")
         try:
             doc = OcrDocument.objects.get(pk=pk)
+        except OcrDocument.DoesNotExist:
+            return Response({"error": "文档未找到"}, status=status.HTTP_404_NOT_FOUND)
+
+        try:
+            # 尝试从上传的文件中读取数据
+            file_obj = request.FILES.get('file')
+            if file_obj:
+                logger.info(f"从上传文件中读取校对数据")
+                corrected_data = json.load(file_obj)
+            else:
+                # 尝试从 request body 中读取 JSON
+                corrected_data = request.data
+                logger.info(f"从 request body 中读取校对数据")
             
-            if not doc.raw_ocr_json:
-                return Response(
-                    {"error": "未找到原始OCR JSON，无法生成Label Studio任务"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            if not doc.mineru_json_path:
-                return Response(
-                    {"error": "文档处理未完成"},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-            
-            # 获取 unique_folder_name
-            json_path = Path(doc.mineru_json_path)
-            unique_folder_name = json_path.parents[2].name
-            
-            # 生成 Label Studio 任务
-            ls_tasks = _generate_ls_tasks(doc.raw_ocr_json, doc, unique_folder_name)
-            
-            if not ls_tasks:
-                return Response(
-                    {"error": "无法生成Label Studio任务"},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
-            
-            # 上传到 Label Studio
-            from .tasks import upload_to_label_studio
-            success = upload_to_label_studio(doc.id, ls_tasks)
-            
-            if success:
+            # 验证数据格式
+            if not isinstance(corrected_data, list):
                 return Response({
-                    "message": f"成功上传 {len(ls_tasks)} 个任务到 Label Studio",
-                    "task_count": len(ls_tasks)
+                    "error": "Invalid JSON format. Expected a list of tasks."
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            logger.info(f"收到 {len(corrected_data)} 个任务的校对数据")
+            
+            # 保存校对后的数据
+            doc.corrected_label_studio_json = corrected_data
+            
+            # 转换为 RAGFlow 格式
+            pages = {}
+            
+            for i, task_data in enumerate(corrected_data):
+                # Label Studio 导出的数据可能使用 'annotations' 或 'completions'
+                annotations = task_data.get('annotations') or task_data.get('completions')
+                
+                if not annotations:
+                    logger.warning(f"任务 {i} 没有标注数据，跳过")
+                    continue
+                
+                # 获取第一个标注结果
+                result = annotations[0].get('result', [])
+                page_num = task_data.get('data', {}).get('page_num', i + 1)
+                
+                logger.debug(f"处理第 {page_num} 页，包含 {len(result)} 个标注项")
+                
+                # 提取文本内容
+                for item in result:
+                    if item.get('type') == 'textarea':
+                        if page_num not in pages:
+                            pages[page_num] = []
+                        text_list = item.get('value', {}).get('text', [])
+                        if text_list:
+                            pages[page_num].append(text_list[0])
+            
+            # 生成 RAGFlow chunks
+            chunks = []
+            for page_num in sorted(pages.keys()):
+                page_text = "\n".join(pages[page_num])
+                if page_text.strip():  # 只添加非空内容
+                    chunks.append({"content_ltxt": page_text})
+            
+            logger.info(f"生成了 {len(chunks)} 个文本块")
+            
+            # 构建 RAGFlow payload
+            ragflow_payload = {
+                "doc_id": Path(doc.original_pdf_path).name,
+                "kb_name": "test_kb",
+                "chunks": chunks
+            }
+            
+            # 更新状态
+            doc.status = 'ingested'
+            doc.save()
+            
+            logger.info(f"文档 {pk} 校对数据已保存，状态更新为 'ingested'")
+            
+            # 返回成功响应
+            serializer = OcrDocumentSerializer(doc)
+            return Response({
+                "message": "校对数据已保存并转换为 RAGFlow 格式",
+                "document": serializer.data,
+                "chunks_count": len(chunks),
+                "ragflow_payload": ragflow_payload
+            }, status=status.HTTP_200_OK)
+            
+        except json.JSONDecodeError as e:
+            logger.error(f"JSON 解析失败: {e}")
+            return Response({
+                "error": "上传的文件不是有效的 JSON 格式"
+            }, status=status.HTTP_400_BAD_REQUEST)
+        except Exception as e:
+            logger.error(f"处理文档 {pk} 校对数据时发生错误: {e}", exc_info=True)
+            return Response({
+                "error": f"处理失败: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class PushToLabelStudioView(APIView):
+    """
+    手动推送文档到 Label Studio
+    支持检查是否已推送和强制重新推送
+    """
+    def post(self, request, pk, *args, **kwargs):
+        try:
+            doc = OcrDocument.objects.get(id=pk)
+            
+            # 检查文档是否已处理完成
+            if doc.status not in ['processed', 'corrected', 'ingested']:
+                return Response({
+                    "error": "文档还未处理完成,无法推送",
+                    "status": doc.status
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 检查是否强制推送
+            force = request.data.get('force', False)
+            
+            # 如果已推送且不是强制推送,返回提示
+            if doc.label_studio_synced and not force:
+                return Response({
+                    "message": "文档已推送到 Label Studio",
+                    "synced": True,
+                    "task_ids": doc.label_studio_task_ids,
+                    "sync_time": doc.label_studio_sync_time,
+                    "hint": "如需重新推送,请设置 force=true"
+                }, status=status.HTTP_200_OK)
+            
+            # 执行推送
+            from django.utils import timezone
+            ls_client = LabelStudioClient()
+            
+            if not ls_client.is_configured():
+                return Response({
+                    "error": "Label Studio 未配置,请设置 LABEL_STUDIO_API_KEY"
+                }, status=status.HTTP_400_BAD_REQUEST)
+            
+            # 读取 MinerU JSON 并生成包含预标注的任务
+            if not doc.mineru_json_path:
+                return Response({
+                    "error": "未找到处理结果文件"
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            mineru_json_path = Path(doc.mineru_json_path)
+            
+            if not mineru_json_path.exists():
+                return Response({
+                    "error": "处理结果文件不存在"
+                }, status=status.HTTP_404_NOT_FOUND)
+            
+            # 读取 MinerU JSON 数据
+            try:
+                with open(mineru_json_path, 'r', encoding='utf-8') as f:
+                    mineru_data = json.load(f)
+            except Exception as e:
+                logger.error(f"读取 MinerU JSON 失败: {e}")
+                return Response({
+                    "error": f"读取处理结果失败: {str(e)}"
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+            # 使用 _generate_ls_tasks 生成包含预标注的任务
+            output_dir = mineru_json_path.parents[2]
+            unique_folder_name = output_dir.name
+            
+            try:
+                tasks_data = _generate_ls_tasks(mineru_data, doc, unique_folder_name)
+            except Exception as e:
+                logger.error(f"生成 Label Studio 任务失败: {e}", exc_info=True)
+                return Response({
+                    "error": f"生成任务失败: {str(e)}"
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+            
+            # 批量创建任务
+            result = ls_client.create_tasks_batch(tasks_data)
+            
+            if result:
+                task_ids = result.get('task_ids', [])
+                doc.label_studio_synced = True
+                doc.label_studio_task_ids = task_ids
+                doc.label_studio_sync_time = timezone.now()
+                doc.save(update_fields=['label_studio_synced', 'label_studio_task_ids', 'label_studio_sync_time'])
+                
+                return Response({
+                    "message": f"成功推送 {len(tasks_data)} 个任务到 Label Studio",
+                    "task_count": len(tasks_data),
+                    "task_ids": task_ids,
+                    "sync_time": doc.label_studio_sync_time
                 }, status=status.HTTP_200_OK)
             else:
-                return Response(
-                    {"error": "上传到 Label Studio 失败，请检查配置和日志"},
-                    status=status.HTTP_500_INTERNAL_SERVER_ERROR
-                )
-            
+                return Response({
+                    "error": "推送到 Label Studio 失败,请检查配置和日志"
+                }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+                
         except OcrDocument.DoesNotExist:
             return Response({"error": "文档未找到"}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
-            logger.error(f"手动上传到Label Studio时出错，文档ID {pk}: {e}", exc_info=True)
-            return Response(
-                {"error": f"发生意外错误: {str(e)}"},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            logger.error(f"推送文档 {pk} 到 Label Studio 失败: {e}", exc_info=True)
+            return Response({
+                "error": f"推送失败: {str(e)}"
+            }, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+
+class ServeImageView(APIView):
+    """
+    静态图片服务
+    为 Label Studio 提供图片访问
+    URL 格式: /api/images/{document_id}/{filename}
+    """
+    
+    def options(self, request, document_id, filename):
+        """处理 CORS 预检请求"""
+        response = HttpResponse()
+        response['Access-Control-Allow-Origin'] = '*'
+        response['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+        response['Access-Control-Allow-Headers'] = '*'
+        return response
+    
+    def get(self, request, document_id, filename):
+        """提供图片文件"""
+        try:
+            # 构建图片路径
+            image_path = BASE_OUTPUT_DIR / document_id / 'pages' / filename
+            
+            # 检查文件是否存在
+            if not image_path.exists():
+                logger.warning(f"图片不存在: {image_path}")
+                raise Http404("图片不存在")
+            
+            # 检查文件安全性（防止路径遍历攻击）
+            if not str(image_path.resolve()).startswith(str(BASE_OUTPUT_DIR.resolve())):
+                logger.warning(f"非法路径访问尝试: {image_path}")
+                raise Http404("非法路径")
+            
+            # 获取文件的 MIME 类型
+            content_type, _ = mimetypes.guess_type(str(image_path))
+            if not content_type:
+                content_type = 'application/octet-stream'
+            
+            # 返回文件并设置 CORS 头（允许 Label Studio 跨域访问）
+            response = FileResponse(
+                open(image_path, 'rb'),
+                content_type=content_type,
+                as_attachment=False
             )
+            # 设置 CORS 头，允许所有来源访问
+            response['Access-Control-Allow-Origin'] = '*'
+            response['Access-Control-Allow-Methods'] = 'GET, OPTIONS'
+            response['Access-Control-Allow-Headers'] = '*'
+            return response
+            
+        except Http404:
+            raise
+        except Exception as e:
+            logger.error(f"提供图片失败: {e}", exc_info=True)
+            raise Http404("图片加载失败")

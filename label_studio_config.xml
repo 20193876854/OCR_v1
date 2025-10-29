@@ -1,0 +1,47 @@
+<View>
+  <!-- 左侧：图片和标注区域 -->
+  <Image name="image" value="$image" zoom="true" zoomControl="true" rotateControl="true" grid="true" />
+  
+  <!-- 右侧：控制和文本编辑区域 -->
+  <View style="display: flex; flex-direction: column; padding-left: 2em; width: 300px;">
+
+    <!-- 1. 文本区域标注 -->
+    <!-- name="bbox" 必须与后端生成预标注时的 from_name:"bbox" 匹配 -->
+    <Header value="文本区域标注" />
+    <RectangleLabels name="bbox" toName="image">
+      <Label value="Title" background="#FF6347" hotkey="t"/>
+      <Label value="Para" background="#4682B4" hotkey="p"/>
+      <Label value="List" background="#32CD32" hotkey="l"/>
+      <Label value="Table" background="#FFD700" />
+      <Label value="Figure" background="#9370DB" />
+      <Label value="Caption" background="#8A2BE2" />
+      <Label value="Formula" background="#00CED1" />
+      <Label value="Header" background="#A9A9A9" />
+      <Label value="Footer" background="#A9A9A9" />
+      <Label value="Reference" background="#20B2AA" />
+      <Label value="Other" background="#778899" />
+    </RectangleLabels>
+
+    <!-- 2. 文本内容编辑 -->
+    <!-- name="transcription" 必须与后端生成预标注时的 from_name:"transcription" 匹配 -->
+    <Header value="文本内容编辑" style="margin-top: 1em;" />
+    <TextArea name="transcription" toName="image" editable="true" perRegion="true" required="true"
+      maxSubmissions="1" rows="8" placeholder="在此处编辑识别出的文本..." />
+
+    <!-- 3. 关系定义 -->
+    <Header value="关系定义" style="margin-top: 1em;" />
+    <Relations>
+        <Relation value="链接到" />
+    </Relations>
+
+    <!-- 4. 质量评估 -->
+    <Header value="页面质量评估" style="margin-top: 1em;" />
+    <Choices name="quality" toName="image" choice="single-radio" showInLine="true">
+      <Choice value="优秀" />
+      <Choice value="良好" />
+      <Choice value="一般" />
+      <Choice value="较差" />
+    </Choices>
+
+  </View>
+</View>

@@ -1,15 +1,54 @@
 <!DOCTYPE html>
-<html lang="">
+<html lang="zh-CN">
   <head>
     <meta charset="utf-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width,initial-scale=1.0">
     <link rel="icon" href="<%= BASE_URL %>favicon.ico">
-    <title><%= htmlWebpackPlugin.options.title %></title>
+    <title>OCR Pipeline Dashboard - <%= htmlWebpackPlugin.options.title %></title>
+    
+    <!-- Tailwind CSS CDN -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    
+    <!-- Google Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    
+    <!-- 加载全局配置文件 -->
+    <script src="<%= BASE_URL %>config.js"></script>
+    
+    <!-- 允许通过环境变量注入配置 -->
+    <script>
+      // 从环境变量读取配置（如果存在）
+      if (typeof VUE_APP_API_BASE_URL !== 'undefined') {
+        window.VUE_APP_API_BASE_URL = VUE_APP_API_BASE_URL;
+      }
+      if (typeof VUE_APP_LABEL_STUDIO_URL !== 'undefined') {
+        window.VUE_APP_LABEL_STUDIO_URL = VUE_APP_LABEL_STUDIO_URL;
+      }
+      
+      // 配置 Tailwind
+      tailwind.config = {
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ['Inter', 'system-ui', 'sans-serif'],
+            }
+          }
+        }
+      }
+    </script>
+    
+    <style>
+      body {
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      }
+    </style>
   </head>
   <body>
     <noscript>
-      <strong>We're sorry but <%= htmlWebpackPlugin.options.title %> doesn't work properly without JavaScript enabled. Please enable it to continue.</strong>
+      <strong>抱歉，<%= htmlWebpackPlugin.options.title %> 需要启用 JavaScript 才能正常工作。</strong>
     </noscript>
     <div id="app"></div>
     <!-- built files will be auto injected -->

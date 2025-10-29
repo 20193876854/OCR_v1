@@ -1,0 +1,86 @@
+# ============================================================
+# 多阶段构建：后端基础镜像
+# 用途：包含系统依赖、Python 依赖和模型文件
+# 优势：可单独构建和缓存，减少重复构建时间
+# ============================================================
+
+# ============================================================
+# 阶段 1: 基础环境 + 系统依赖
+# ============================================================
+FROM python:3.11-slim AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+WORKDIR /app
+
+# 安装系统依赖
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+    poppler-utils \
+    netcat-openbsd \
+    dos2unix \
+    libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
+    && apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# ============================================================
+# 阶段 2: Python 依赖层
+# ============================================================
+FROM base AS dependencies
+
+# 复制并安装 Python 依赖
+COPY requirements.txt .
+RUN pip install --default-timeout=1000 \
+    -i https://pypi.tuna.tsinghua.edu.cn/simple \
+    --no-cache-dir \
+    -r requirements.txt
+
+# ============================================================
+# 阶段 3: 模型下载层（可选，用于预构建）
+# 注意：MinerU 会在首次使用时自动下载模型
+# 预下载失败不影响镜像构建
+# ============================================================
+FROM dependencies AS model-cache
+
+ARG MINERU_MODEL_SOURCE=modelscope
+ENV MINERU_MODEL_SOURCE=${MINERU_MODEL_SOURCE}
+
+# 尝试预下载模型文件（失败不影响构建）
+COPY scripts/download_models.py /tmp/download_models.py
+RUN echo "尝试预下载 MinerU 模型文件..." && \
+    python /tmp/download_models.py || echo "预下载跳过，模型将在首次使用时下载" && \
+    rm /tmp/download_models.py
+
+# ============================================================
+# 阶段 4: 最终运行时镜像
+# ============================================================
+FROM model-cache AS runtime
+
+# 复制启动脚本
+COPY wait-for-it.sh entrypoint.sh ./
+RUN dos2unix /app/wait-for-it.sh && chmod +x /app/wait-for-it.sh && \
+    dos2unix /app/entrypoint.sh && chmod +x /app/entrypoint.sh
+
+# 复制应用代码（最后复制，利用缓存）
+COPY . .
+
+EXPOSE 8010
+
+ENTRYPOINT ["/app/entrypoint.sh"]
+
+# ============================================================
+# 使用说明：
+# 
+# 方式 1：完整构建（包含模型下载）
+# docker build -t ocr-backend:latest -f dockerfile .
+#
+# 方式 2：跳过模型下载（使用已有基础镜像）
+# docker build --target runtime -t ocr-backend:latest -f dockerfile .
+#
+# 方式 3：只构建基础镜像（预构建缓存）
+# docker build --target model-cache -t ocr-backend:base -f dockerfile .
+# ============================================================

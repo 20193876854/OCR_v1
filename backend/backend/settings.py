@@ -12,8 +12,7 @@ load_dotenv(dotenv_path=env_path)
 # ... (SECRET_KEY, DEBUG, ALLOWED_HOSTS, etc. remain the same) ...
 SECRET_KEY = 'django-insecure-^j%3#x#c+q#@&z#a$a@d@a&o)v$!y!#p!j$o!c@t#y'
 DEBUG = True
-# 允许所有主机访问（生产环境请设置具体域名）
-ALLOWED_HOSTS = ['*']
+ALLOWED_HOSTS = ['*']  # 允许所有主机访问（包括 host.docker.internal 和容器网络）
 
 
 # Application definition
@@ -89,7 +88,31 @@ STATIC_URL = 'static/'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 
+# CORS 配置 - 允许 Label Studio 跨域访问
 CORS_ALLOW_ALL_ORIGINS = True
+CORS_ALLOW_CREDENTIALS = True
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:8081",
+    "http://127.0.0.1:8081",
+    "http://host.docker.internal:8081",
+]
+CORS_ALLOW_HEADERS = [
+    'accept',
+    'accept-encoding',
+    'authorization',
+    'content-type',
+    'dnt',
+    'origin',
+    'user-agent',
+    'x-csrftoken',
+    'x-requested-with',
+    'range',
+]
+CORS_EXPOSE_HEADERS = [
+    'content-length',
+    'content-type',
+    'content-disposition',
+]
 
 # --- 核心改动：从环境变量读取Redis主机 ---
 REDIS_HOST = os.getenv('REDIS_HOST', 'localhost')
@@ -104,7 +127,7 @@ DATA_ROOT_PATH = Path(os.getenv('LOCAL_DATA_PATH')) if os.getenv('LOCAL_DATA_PAT
 DATA_UPLOAD_MAX_MEMORY_SIZE = 50 * 1024 * 1024
 
 # Label Studio 配置
-LABEL_STUDIO_URL = os.getenv('LABEL_STUDIO_URL', 'http://label-studio:8081')
-LABEL_STUDIO_API_KEY = os.getenv('LABEL_STUDIO_API_KEY', '')  # 可选：如果需要认证
-LABEL_STUDIO_PROJECT_ID = os.getenv('LABEL_STUDIO_PROJECT_ID', '')  # 项目ID
+LABEL_STUDIO_URL = os.getenv('LABEL_STUDIO_URL', 'http://label-studio:8080')
+LABEL_STUDIO_API_KEY = os.getenv('LABEL_STUDIO_API_KEY', '')  # 需要在 Label Studio 中生成
+LABEL_STUDIO_PROJECT_ID = os.getenv('LABEL_STUDIO_PROJECT_ID', '1')  # 默认项目 ID
 

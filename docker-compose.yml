@@ -2,7 +2,6 @@ version: '3.8'
 
 services:
   db:
-    # ... (db service remains unchanged) ...
     image: postgres:16
     container_name: ocr_postgres_db
     volumes:
@@ -13,144 +12,135 @@ services:
       - POSTGRES_PASSWORD=test1234
     ports:
       - "5432:5432"
+    restart: unless-stopped
 
   redis:
-    # ... (redis service remains unchanged) ...
     image: redis:7-alpine
     container_name: ocr_redis
     ports:
       - "6379:6379"
+    restart: unless-stopped
 
   # ====================================================================
-  # VVVV 请确保您的 backend 服务配置与此完全一致 VVVV
+  # Backend 服务 - Django API
   # ====================================================================
   backend:
-    build: ./backend
+    build: 
+      context: ./backend
+      args:
+        # 构建时参数：模型源配置
+        MINERU_MODEL_SOURCE: ${MINERU_MODEL_SOURCE:-modelscope}
     container_name: ocr_backend
     command: >
-      sh -c "
-      echo 'Waiting for database...' &&
-      while ! nc -z db 5432; do sleep 1; done &&
-      echo 'Database is ready!' &&
-      echo 'Waiting for Redis...' &&
-      while ! nc -z redis 6379; do sleep 1; done &&
-      echo 'Redis is ready!' &&
-      python manage.py migrate &&
-      gunicorn backend.wsgi:application --bind 0.0.0.0:8010 --timeout 300
-      "
+      sh -c "python manage.py migrate && 
+             gunicorn backend.wsgi:application --bind 0.0.0.0:8010 --workers 4 --timeout 300"
     volumes:
       - ./backend:/app
-      - ./data:/data         # <-- 重点检查这里：必须是 ./data:/data
-    expose:
-      - "8010"               # 改为内部暴露，不直接映射到主机
+      - ./data:/data
+    ports:
+      - "8010:8010"
     depends_on:
       - db
       - redis
     environment:
-      - LOCAL_DATA_PATH=/    # <-- 重点检查这里：必须是 /
+      - LOCAL_DATA_PATH=/
       - POSTGRES_NAME=ocr_pipeline_db
       - POSTGRES_USER=test
       - POSTGRES_PASSWORD=test1234
       - POSTGRES_HOST=db
       - POSTGRES_PORT=5432
       - REDIS_HOST=redis
-      # Label Studio 配置
-      - LABEL_STUDIO_URL=http://label-studio:8080
-      - LABEL_STUDIO_API_KEY=
-      - LABEL_STUDIO_PROJECT_ID=1  # 替换为您在 Label Studio 中创建的项目ID
+      - LABEL_STUDIO_URL=${LABEL_STUDIO_URL:-http://label-studio:8080}
+      - LABEL_STUDIO_API_KEY=${LABEL_STUDIO_API_KEY}
+      - LABEL_STUDIO_PROJECT_ID=${LABEL_STUDIO_PROJECT_ID:-1}
+      # 浏览器访问图片用 localhost（Label Studio 在浏览器中加载图片）
+      - BACKEND_EXTERNAL_URL=${BACKEND_EXTERNAL_URL:-http://localhost:8010}
     restart: unless-stopped
-  # ====================================================================
 
   # ====================================================================
-  # VVVV 请确保您的 celery 服务配置与此完全一致 VVVV
+  # Celery Worker 服务 - 异步任务处理
+  # 支持 GPU 加速（可选）
   # ====================================================================
   celery:
-    build: ./backend
+    build: 
+      context: ./backend
+      args:
+        MINERU_MODEL_SOURCE: ${MINERU_MODEL_SOURCE:-modelscope}
     container_name: ocr_celery_worker
-    command: >
-      sh -c "
-      echo 'Waiting for database...' &&
-      while ! nc -z db 5432; do sleep 1; done &&
-      echo 'Database is ready!' &&
-      echo 'Waiting for Redis...' &&
-      while ! nc -z redis 6379; do sleep 1; done &&
-      echo 'Redis is ready!' &&
-      celery -A backend worker -l info
-      "
+    command: celery -A backend worker -l info --concurrency=${CELERY_CONCURRENCY:-2}
     volumes:
       - ./backend:/app
-      - ./data:/data         # <-- 重点检查这里：必须是 ./data:/data
+      - ./data:/data
+      - mineru_models:/root/.cache        # 模型缓存持久化，避免重复下载
     depends_on:
       - backend
-      - db
-      - redis
     environment:
-      - LOCAL_DATA_PATH=/    # <-- 重点检查这里：必须是 /
+      - LOCAL_DATA_PATH=/
       - POSTGRES_NAME=ocr_pipeline_db
       - POSTGRES_USER=test
       - POSTGRES_PASSWORD=test1234
       - POSTGRES_HOST=db
       - POSTGRES_PORT=5432
       - REDIS_HOST=redis
-      - MINERU_MODEL_SOURCE=modelscope
-      # Label Studio 配置
-      - LABEL_STUDIO_URL=http://label-studio:8080
-      - LABEL_STUDIO_API_KEY=
-      - LABEL_STUDIO_PROJECT_ID=1  # 替换为您在 Label Studio 中创建的项目ID
+      - MINERU_MODEL_SOURCE=${MINERU_MODEL_SOURCE:-modelscope}
+      - LABEL_STUDIO_URL=${LABEL_STUDIO_URL:-http://label-studio:8080}
+      - LABEL_STUDIO_API_KEY=${LABEL_STUDIO_API_KEY}
+      - LABEL_STUDIO_PROJECT_ID=${LABEL_STUDIO_PROJECT_ID:-1}
+      # 浏览器访问图片用 localhost（Label Studio 在浏览器中加载图片）
+      - BACKEND_EXTERNAL_URL=${BACKEND_EXTERNAL_URL:-http://localhost:8010}
     restart: unless-stopped
-  # ====================================================================
+    # GPU 配置（需要 Docker Compose v1.28+ 和 nvidia-docker）
+    # 取消下面的注释以启用 GPU 支持
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: ${GPU_COUNT:-1}
+    #           capabilities: [gpu]
 
+  # ====================================================================
+  # Frontend 服务 - Vue.js 前端
+  # ====================================================================
   frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
+    build: ./frontend
     container_name: ocr_frontend
-    expose:
-      - "80"                 # Nginx 默认监听 80 端口
+    ports:
+      - "${FRONTEND_PORT:-8082}:8082"
     depends_on:
       - backend
+    environment:
+      # 动态配置后端 API 地址
+      - VUE_APP_API_BASE_URL=${VUE_APP_API_BASE_URL:-http://localhost:8010/api}
+      - VUE_APP_LABEL_STUDIO_URL=${VUE_APP_LABEL_STUDIO_URL:-http://localhost:8081}
     restart: unless-stopped
       
+  # ====================================================================
+  # Label Studio 服务 - 数据标注工具
+  # ====================================================================
   label-studio:
     image: heartexlabs/label-studio:latest
     container_name: ocr_label_studio
     ports:
-      - "8081:8080"  # Label Studio 内部监听 8080，映射到主机的 8081
+      - "${LABEL_STUDIO_PORT:-8081}:8080"
     volumes:
-      - label_studio_data:/label-studio/data
-      - ./data:/data:ro  # 允许 Label Studio 读取 OCR 生成的图片
+      - ./data:/label-studio/data
+      - label_studio_data:/label-studio
     environment:
       - LABEL_STUDIO_LOCAL_FILES_SERVING_ENABLED=true
-      - LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT=/data
-      # 配置子路径支持（通过 Nginx 访问时）
-      - LABEL_STUDIO_BASE_URL=/label-studio
-      - LABEL_STUDIO_HOST=
-      - LABEL_STUDIO_PROTOCOL=http
-      # 开发环境：禁用用户认证（生产环境请删除此行）
-      - LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK=false
-      - LABEL_STUDIO_USERNAME=admin@example.com
-      - LABEL_STUDIO_PASSWORD=admin123
+      - LABEL_STUDIO_LOCAL_FILES_DOCUMENT_ROOT=/label-studio/data
+      - DJANGO_SETTINGS_MODULE=label_studio.core.settings.label_studio
+      - DISABLE_LEGACY_TOKEN_AUTHENTICATION=false
+      # 允许跨域访问外部图片
+      - LABEL_STUDIO_DISABLE_SIGNUP_WITHOUT_LINK=true
+      # 允许从任何源加载图片
+      - SSRF_PROTECTION_ENABLED=false
+    # 添加 host.docker.internal 映射，允许容器访问宿主机服务
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
-
-  # Nginx 反向代理服务 - 统一入口
-  nginx:
-    image: nginx:alpine
-    container_name: ocr_nginx
-    ports:
-      - "80:80"              # 主要访问端口，可根据需要修改
-    volumes:
-      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
-    depends_on:
-      - frontend
-      - backend
-    restart: unless-stopped
-    healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost/"]
-      interval: 10s
-      timeout: 5s
-      retries: 3
-      start_period: 40s
 
 volumes:
   postgres_data:
   label_studio_data:
+  mineru_models:      # MinerU 模型缓存，避免重复下载

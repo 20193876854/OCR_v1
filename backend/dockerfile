@@ -6,37 +6,57 @@ FROM python:3.11
 ENV DEBIAN_FRONTEND=noninteractive
 
 # 设置其他环境变量
-ENV PYTHONDONTWRITEBYTECODE 1
-ENV PYTHONUNBUFFERED 1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# MinerU 模型配置 - 可在构建时通过 --build-arg 覆盖
+ARG MINERU_MODEL_SOURCE=modelscope
+ENV MINERU_MODEL_SOURCE=${MINERU_MODEL_SOURCE}
 
 # 设置工作目录
 WORKDIR /app
 
-# 安装所有系统依赖
+# ============================================================
+# 第一层：安装系统依赖（最少变化，最大缓存利用）
+# ============================================================
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
     poppler-utils \
     netcat-openbsd \
     dos2unix \
     libgl1 \
+    libglib2.0-0 \
+    libgomp1 \
     && apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
-# 复制依赖文件
+# ============================================================
+# 第二层：安装 Python 依赖（requirements.txt 变化时才重建）
+# ============================================================
 COPY requirements.txt .
-
-# 安装 Python 依赖
 RUN pip install --default-timeout=1000 -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
 
-# 复制启动脚本
+# ============================================================
+# 第三层：预下载 MinerU 模型（可选，不影响构建）
+# 注意：MinerU 模型会在首次运行时自动下载
+# 这里的预下载只是尝试提前下载，失败不影响系统运行
+# ============================================================
+COPY scripts/download_models.py /tmp/download_models.py
+RUN echo "尝试预下载 MinerU 模型文件..." && \
+    python /tmp/download_models.py || echo "预下载跳过，模型将在首次使用时下载" && \
+    rm /tmp/download_models.py
+
+# ============================================================
+# 第四层：复制启动脚本并设置权限
+# ============================================================
 COPY wait-for-it.sh .
 COPY entrypoint.sh .
-
-# 转换脚本的换行符为 Unix 格式并赋予执行权限
 RUN dos2unix /app/wait-for-it.sh && chmod +x /app/wait-for-it.sh && \
     dos2unix /app/entrypoint.sh && chmod +x /app/entrypoint.sh
 
-# 复制项目其他所有文件
+# ============================================================
+# 第五层：复制项目代码（代码变化频繁，放在最后）
+# ============================================================
 COPY . .
 
 # 暴露端口
